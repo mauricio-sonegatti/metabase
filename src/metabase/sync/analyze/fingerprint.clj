@@ -53,11 +53,22 @@
 
 (s/defn ^:private fingerprint-table!
   [table :- i/TableInstance, fields :- [i/FieldInstance]]
-  (doseq [[field sample] (sample/sample-fields table fields)]
-    (when sample
-      (sync-util/with-error-handling (format "Error generating fingerprint for %s" (sync-util/name-for-logging field))
-        (let [fingerprint (fingerprint field sample)]
-          (save-fingerprint! field fingerprint))))))
+  (let [fields-to-sample (sample/sample-fields table fields)]
+    (reduce (fn [count-info [field sample]]
+              (if-not sample
+                (update count-info :no-data-fingerprints inc)
+                (let [result (sync-util/with-error-handling (format "Error generating fingerprint for %s"
+                                                                    (sync-util/name-for-logging field))
+                               (let [fingerprint (fingerprint field sample)]
+                                 (save-fingerprint! field fingerprint)))]
+                  (if (instance? Exception result)
+                    (update count-info :failed-fingerprints inc)
+                    (update count-info :updated-fingerprints inc)))))
+            {:no-data-fingerprints   0
+             :failed-fingerprints    0
+             :updated-fingerprints   0
+             :fingerprints-attempted (count fields-to-sample)}
+            fields-to-sample)))
 
 
 ;;; +----------------------------------------------------------------------------------------------------------------+
@@ -162,6 +173,8 @@
   [database :- i/DatabaseInstance
    tables :- [i/TableInstance]
    log-progress-fn]
-  (doseq [table tables]
-    (fingerprint-fields! table)
-    (log-progress-fn "fingerprint-fields" table)))
+  (apply merge-with + (map (fn [table]
+                             (let [result (fingerprint-fields! table)]
+                               (log-progress-fn "fingerprint-fields" table)
+                               result))
+                           tables)))
